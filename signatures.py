@@ -1,52 +1,85 @@
 """
-Member 3 — Digital Signatures, server side
-(requirement #5: "Each sender has a signing key pair"
- requirement #6: "Messages contain a sender signature and the signature is verified")
+Digital Signatures
 
-Each client generates an ECDSA P-256 key pair in the browser (see
-static/crypto.js) — the private key never leaves the browser. The public key
-(as a JWK) is sent once at join time; every chat message is signed client-side
-and verified here using the `cryptography` library.
+Each connected sender receives an ECDSA P-256 signing key pair.
+
+The private key is kept on the server for the active session.
+The public key is stored with each message so the signature can be
+verified again when chat history is loaded.
 """
+
 import base64
-from cryptography.hazmat.primitives.asymmetric import ec, utils as asym_utils
-from cryptography.hazmat.primitives import hashes
+
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 
-def jwk_to_public_key(jwk: dict) -> ec.EllipticCurvePublicKey:
-    """Converts a P-256 JWK (as exported by the browser's Web Crypto API) into
-    a `cryptography` EC public key object."""
-    x = int.from_bytes(_b64url_decode(jwk["x"]), "big")
-    y = int.from_bytes(_b64url_decode(jwk["y"]), "big")
-    numbers = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1())
-    return numbers.public_key()
-
-
-def _b64url_decode(data: str) -> bytes:
-    padding = "=" * (-len(data) % 4)
-    return base64.urlsafe_b64decode(data + padding)
-
-
-def _raw_to_der(signature_b64: str) -> bytes:
-    """Web Crypto's ECDSA sign() returns a raw (r || s) 64-byte signature for
-    P-256, but `cryptography`'s verify() expects DER encoding — convert it."""
-    raw = base64.b64decode(signature_b64)
-    r = int.from_bytes(raw[:32], "big")
-    s = int.from_bytes(raw[32:], "big")
-    return asym_utils.encode_dss_signature(r, s)
-
-
-def verify_signature(pubkey_jwk: dict, signature_b64: str, message: str) -> bool:
+def generate_keypair():
     """
-    message must be the EXACT string the client signed — see
-    static/crypto.js `canonicalMessage()` and app.py's matching helper,
-    both must build the string identically or every signature will fail.
+    Generate an ECDSA P-256 private/public key pair.
     """
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key()
+
+    return private_key, public_key
+
+
+def public_key_to_pem(public_key) -> str:
+    """
+    Convert a public key into PEM text so it can be stored in SQLite.
+    """
+    pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+    return pem.decode("utf-8")
+
+
+def sign_message(private_key, message: str) -> str:
+    """
+    Sign a message using ECDSA with SHA-256.
+
+    Returns the DER signature encoded as Base64 text.
+    """
+    signature = private_key.sign(
+        message.encode("utf-8"),
+        ec.ECDSA(hashes.SHA256())
+    )
+
+    return base64.b64encode(signature).decode("utf-8")
+
+
+def verify_signature(
+    public_key_pem: str,
+    signature_b64: str,
+    message: str
+) -> bool:
+    """
+    Verify an ECDSA SHA-256 signature.
+    """
+
     try:
-        public_key = jwk_to_public_key(pubkey_jwk)
-        der_sig = _raw_to_der(signature_b64)
-        public_key.verify(der_sig, message.encode("utf-8"), ec.ECDSA(hashes.SHA256()))
+        public_key = serialization.load_pem_public_key(
+            public_key_pem.encode("utf-8")
+        )
+
+        signature = base64.b64decode(
+            signature_b64
+        )
+
+        public_key.verify(
+            signature,
+            message.encode("utf-8"),
+            ec.ECDSA(hashes.SHA256())
+        )
+
         return True
-    except (InvalidSignature, ValueError, KeyError, IndexError):
+
+    except (
+        InvalidSignature,
+        ValueError,
+        TypeError
+    ):
         return False
