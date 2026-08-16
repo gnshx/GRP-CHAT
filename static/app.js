@@ -39,15 +39,18 @@ function connect(username) {
 
     socket = new WebSocket(wsUrl());
 
-    socket.addEventListener("open", () => {
+    socket.addEventListener("open", async () => {
 
         connStatus.textContent = "● connected";
         connStatus.classList.remove("offline");
 
+        const pubkey = await exportPublicKeyJwk();
+
         socket.send(
             JSON.stringify({
                 type: "join",
-                username: username
+                username: username,
+                pubkey: pubkey
             })
         );
     });
@@ -96,8 +99,16 @@ function handleServerMessage(msg) {
             renderMessage(msg);
             break;
 
+        case "history":
+            msg.messages.forEach(renderMessage);
+            break;
+
         case "notice":
             renderNotice(msg.text);
+            break;
+
+        case "error":
+            renderNotice(`⚠ ${msg.text}`);
             break;
 
         case "userlist":
@@ -135,12 +146,18 @@ function renderMessage(msg) {
     meta.textContent =
         `${isOwn ? "You" : msg.username} · ${formatTime(msg.timestamp)}`;
 
+    meta.appendChild(signatureBadge(msg));
+
 
     const text = document.createElement("div");
 
     text.className = "text";
 
     text.textContent = msg.text;
+
+    if (msg.tampered) {
+        div.classList.add("tampered");
+    }
 
 
     div.appendChild(meta);
@@ -149,6 +166,25 @@ function renderMessage(msg) {
     messagesEl.appendChild(div);
 
     scrollToBottom();
+}
+
+
+function signatureBadge(msg) {
+
+    const badge = document.createElement("span");
+
+    if (msg.tampered) {
+        badge.className = "badge badge-tampered";
+        badge.textContent = "⚠ tampered";
+    } else if (msg.signature_valid) {
+        badge.className = "badge badge-verified";
+        badge.textContent = "✓ verified";
+    } else {
+        badge.className = "badge badge-unverified";
+        badge.textContent = "✗ unverified";
+    }
+
+    return badge;
 }
 
 
@@ -286,7 +322,7 @@ usernameInput.addEventListener(
 
 messageForm.addEventListener(
     "submit",
-    (event) => {
+    async (event) => {
 
         event.preventDefault();
 
@@ -303,10 +339,20 @@ messageForm.addEventListener(
         }
 
 
+        const timestamp = Date.now();
+
+        const signature = await signMessage(
+            myUsername,
+            text,
+            timestamp
+        );
+
         socket.send(
             JSON.stringify({
                 type: "message",
-                text: text
+                text: text,
+                timestamp: timestamp,
+                signature: signature
             })
         );
 

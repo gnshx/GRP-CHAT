@@ -367,3 +367,37 @@ body {
 
     transform: translateY(-1px);
 }
+
+/* --- Member 3 & 4: signature / tamper badges --- */
+
+.badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    vertical-align: middle;
+}
+
+.badge-verified {
+    background: rgba(45, 212, 191, 0.15);
+    color: #2dd4bf;
+}
+
+.badge-unverified {
+    background: rgba(148, 163, 184, 0.15);
+    color: #94a3b8;
+}
+
+.badge-tampered {
+    background: rgba(248, 113, 113, 0.15);
+    color: #f87171;
+}
+
+.msg.tampered .text {
+    border: 1px dashed #f87171;
+    border-radius: 8px;
+    padding: 6px 8px;
+}
