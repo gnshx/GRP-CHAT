@@ -24,7 +24,10 @@ let reconnectTimeout = null;
 let lastTypingSent = 0;
 
 
+/* ---------- WebSocket URL ---------- */
+
 function wsUrl() {
+
     const protocol =
         location.protocol === "https:"
             ? "wss:"
@@ -34,23 +37,24 @@ function wsUrl() {
 }
 
 
+/* ---------- Connect ---------- */
+
 function connect(username) {
+
     clearTimeout(reconnectTimeout);
 
     socket = new WebSocket(wsUrl());
 
-    socket.addEventListener("open", async () => {
+
+    socket.addEventListener("open", () => {
 
         connStatus.textContent = "● connected";
         connStatus.classList.remove("offline");
 
-        const pubkey = await exportPublicKeyJwk();
-
         socket.send(
             JSON.stringify({
                 type: "join",
-                username: username,
-                pubkey: pubkey
+                username: username
             })
         );
     });
@@ -59,11 +63,13 @@ function connect(username) {
     socket.addEventListener("message", (event) => {
 
         try {
+
             const msg = JSON.parse(event.data);
 
             handleServerMessage(msg);
 
         } catch (error) {
+
             console.error(
                 "Invalid server message:",
                 error
@@ -80,16 +86,25 @@ function connect(username) {
         connStatus.classList.add("offline");
 
         reconnectTimeout = setTimeout(() => {
-            connect(username);
+
+            if (myUsername) {
+                connect(myUsername);
+            }
+
         }, 2000);
     });
 
 
     socket.addEventListener("error", () => {
+
+        console.error("WebSocket error");
+
         socket.close();
     });
 }
 
+
+/* ---------- Server Messages ---------- */
 
 function handleServerMessage(msg) {
 
@@ -100,7 +115,9 @@ function handleServerMessage(msg) {
             break;
 
         case "history":
+
             msg.messages.forEach(renderMessage);
+
             break;
 
         case "notice":
@@ -120,6 +137,7 @@ function handleServerMessage(msg) {
             break;
 
         default:
+
             console.warn(
                 "Unknown server message:",
                 msg
@@ -127,6 +145,8 @@ function handleServerMessage(msg) {
     }
 }
 
+
+/* ---------- Render Message ---------- */
 
 function renderMessage(msg) {
 
@@ -155,7 +175,9 @@ function renderMessage(msg) {
 
     text.textContent = msg.text;
 
+
     if (msg.tampered) {
+
         div.classList.add("tampered");
     }
 
@@ -169,24 +191,42 @@ function renderMessage(msg) {
 }
 
 
+/* ---------- Signature Badge ---------- */
+
 function signatureBadge(msg) {
 
     const badge = document.createElement("span");
 
     if (msg.tampered) {
-        badge.className = "badge badge-tampered";
-        badge.textContent = "⚠ tampered";
+
+        badge.className =
+            "badge badge-tampered";
+
+        badge.textContent =
+            "⚠ tampered";
+
     } else if (msg.signature_valid) {
-        badge.className = "badge badge-verified";
-        badge.textContent = "✓ verified";
+
+        badge.className =
+            "badge badge-verified";
+
+        badge.textContent =
+            "✓ verified";
+
     } else {
-        badge.className = "badge badge-unverified";
-        badge.textContent = "✗ unverified";
+
+        badge.className =
+            "badge badge-unverified";
+
+        badge.textContent =
+            "✗ unverified";
     }
 
     return badge;
 }
 
+
+/* ---------- Notice ---------- */
 
 function renderNotice(text) {
 
@@ -201,6 +241,8 @@ function renderNotice(text) {
     scrollToBottom();
 }
 
+
+/* ---------- Online Users ---------- */
 
 function renderUserList(users) {
 
@@ -222,15 +264,23 @@ function renderUserList(users) {
 
 
         if (username === myUsername) {
+
             li.classList.add("me");
         }
+
 
         userListEl.appendChild(li);
     });
 }
 
 
+/* ---------- Typing ---------- */
+
 function showTyping(username) {
+
+    if (username === myUsername) {
+        return;
+    }
 
     typingIndicator.textContent =
         `${username} is typing…`;
@@ -238,10 +288,14 @@ function showTyping(username) {
     clearTimeout(typingTimeout);
 
     typingTimeout = setTimeout(() => {
+
         typingIndicator.textContent = "";
+
     }, 1500);
 }
 
+
+/* ---------- Time ---------- */
 
 function formatTime(timestamp) {
 
@@ -257,6 +311,8 @@ function formatTime(timestamp) {
     );
 }
 
+
+/* ---------- Scroll ---------- */
 
 function scrollToBottom() {
 
@@ -312,6 +368,7 @@ usernameInput.addEventListener(
     (event) => {
 
         if (event.key === "Enter") {
+
             doJoin();
         }
     }
@@ -322,9 +379,10 @@ usernameInput.addEventListener(
 
 messageForm.addEventListener(
     "submit",
-    async (event) => {
+    (event) => {
 
         event.preventDefault();
+
 
         const text =
             messageInput.value.trim();
@@ -335,29 +393,37 @@ messageForm.addEventListener(
             !socket ||
             socket.readyState !== WebSocket.OPEN
         ) {
+
             return;
         }
 
 
         const timestamp = Date.now();
 
-        const signature = await signMessage(
-            myUsername,
-            text,
-            timestamp
-        );
+
+        /*
+         * No signMessage() here.
+         *
+         * The server now:
+         * 1. Signs the message using ECDSA
+         * 2. Verifies the signature
+         * 3. Encrypts the message
+         * 4. Creates the integrity hash
+         * 5. Stores it in SQLite
+         */
 
         socket.send(
             JSON.stringify({
                 type: "message",
                 text: text,
-                timestamp: timestamp,
-                signature: signature
+                timestamp: timestamp
             })
         );
 
 
         messageInput.value = "";
+
+        typingIndicator.textContent = "";
     }
 );
 
