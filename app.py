@@ -387,41 +387,37 @@ def ws_handler(ws):
 
 
                 # Requirement 4:
-                # Create hash chain.
+                # Create hash chain — this must happen atomically
+                # (read-tail + insert) or concurrent senders can
+                # link to the same prev_hash and break the chain.
 
-                prev_hash = db.get_last_hash()
-
-
-                record_hash = (
-                    integrity.compute_record_hash(
-                        prev_hash,
+                try:
+                    prev_hash, record_hash = db.append_message(
                         username,
                         ciphertext,
                         signature,
-                        timestamp
+                        public_key_pem,
+                        timestamp,
+                        lambda ph: integrity.compute_record_hash(
+                            ph, username, ciphertext, signature, timestamp
+                        )
                     )
-                )
 
+                except Exception as e:
 
-                # Requirement 1:
-                # Save encrypted message.
+                    print(f"[error] failed to save message from {username}: {e}")
 
-                db.save_message(
+                    ws.send(
+                        json.dumps({
 
-                    username,
+                            "type": "error",
 
-                    ciphertext,
+                            "text":
+                                "Message could not be saved, please try again."
+                        })
+                    )
 
-                    signature,
-
-                    public_key_pem,
-
-                    timestamp,
-
-                    prev_hash,
-
-                    record_hash
-                )
+                    continue
 
 
                 print(

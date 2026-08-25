@@ -6,8 +6,10 @@ _lock = threading.Lock()
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -44,7 +46,7 @@ def get_last_hash() -> str:
 
 
 def save_message(username, ciphertext, signature, pubkey_jwk, timestamp, prev_hash, record_hash):
-    with _lock, get_conn() as conn:
+    with get_conn() as conn:
         conn.execute(
             """INSERT INTO messages
                (username, ciphertext, signature, pubkey_jwk, timestamp, prev_hash, record_hash)
@@ -52,6 +54,32 @@ def save_message(username, ciphertext, signature, pubkey_jwk, timestamp, prev_ha
             (username, ciphertext, signature, pubkey_jwk, timestamp, prev_hash, record_hash)
         )
         conn.commit()
+
+
+def append_message(username, ciphertext, signature, pubkey_jwk, timestamp, compute_hash_fn):
+    """
+    Atomically reads the current chain tail and inserts the new record, under
+    a single lock, so no two threads can ever read the same prev_hash and
+    both link off it. compute_hash_fn(prev_hash) -> record_hash.
+    """
+    with _lock:
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT record_hash FROM messages ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            prev_hash = row["record_hash"] if row else "0" * 64
+
+            record_hash = compute_hash_fn(prev_hash)
+
+            conn.execute(
+                """INSERT INTO messages
+                   (username, ciphertext, signature, pubkey_jwk, timestamp, prev_hash, record_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (username, ciphertext, signature, pubkey_jwk, timestamp, prev_hash, record_hash)
+            )
+            conn.commit()
+
+    return prev_hash, record_hash
 
 
 def load_history(limit=200):
