@@ -23,3 +23,12 @@ loadbalancer
 
 # Local benchmark tools
 dry_run_leaderboard.py
+
+# Reports, charts and their generators (local only)
+Dynamic_Load_Balancer_Report.docx
+Dynamic_Load_Balancer_Report.pdf
+Dynamic_Load_Balancer_Report.md
+Dynamic_Load_Balancer_Report.odt
+generate_report.py
+make_charts.py
+charts/
