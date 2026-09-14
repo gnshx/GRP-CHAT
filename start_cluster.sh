@@ -34,8 +34,8 @@ else
     PYTHON_BIN="$(command -v python3 || command -v python)"
 fi
 
-echo "=== Stopping any existing processes on ports 6000, 3310, 3311, 5312 ==="
-for port in 6000 3310 3311 5312; do
+echo "=== Stopping any existing processes on ports 6000, 8000, 3310, 3311, 5312 ==="
+for port in 6000 8000 3310 3311 5312; do
     lsof -ti:$port 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 pkill -f "loadbalancer -backends" 2>/dev/null || true
@@ -107,13 +107,14 @@ for port in 3310 3311 5312; do
     fi
 done
 
-echo "=== Starting Dynamic Performance-Based Load Balancer on port 6000 ==="
+echo "=== Starting Dynamic Performance-Based Load Balancer on port 6000 (mirror on 8000) ==="
 DEFAULT_BACKENDS="http://127.0.0.1:3310,http://127.0.0.1:3311,http://127.0.0.1:5312"
 BACKENDS="${BACKENDS:-$DEFAULT_BACKENDS}"
 
 setsid nohup "$APP_DIR/loadbalancer" \
     -backends="$BACKENDS" \
     -port=6000 \
+    -alt-port=8000 \
     -threshold=5 \
     -cpu-threshold=75.0 \
     -health-interval=1s \
@@ -132,11 +133,16 @@ fi
 if curl -s "http://127.0.0.1:6000/health" | grep -q "healthy"; then
     echo "=================================================================="
     echo "  GRP-CHAT Dynamic LB Cluster is RUNNING SUCCESSFULLY!            "
-    echo "  Load Balancer URL:   http://${HOST_IP}:6000/"
-    echo "  Required Routes:     http://${HOST_IP}:6000/message (POST)"
-    echo "                       http://${HOST_IP}:6000/feed    (GET)"
-    echo "  LB Diagnostics:      http://${HOST_IP}:6000/lb-status"
-    echo "  LB Health:           http://${HOST_IP}:6000/health"
+    echo ""
+    echo "  🌐 Web Browser URL (Chrome-safe): http://${HOST_IP}:8000/"
+    echo "     (Bypasses Chrome's ERR_UNSAFE_PORT restriction on port 6000)"
+    echo ""
+    echo "  📡 Submission & Evaluator URL:   http://${HOST_IP}:6000/"
+    echo "  • Required Route 1:  POST http://${HOST_IP}:6000/message"
+    echo "  • Required Route 2:  GET  http://${HOST_IP}:6000/feed"
+    echo "  • LB Diagnostics:    GET  http://${HOST_IP}:6000/lb-status"
+    echo "  • Health Check:      GET  http://${HOST_IP}:6000/health (or :8000/health)"
+    echo ""
     echo "  PIDs: Sys2=$PID_SYS2, Sys3=$PID_SYS3, Sys4=$PID_SYS4, LB=$PID_LB"
     echo "=================================================================="
 else

@@ -116,6 +116,14 @@ else
     report_fail "Sys1 (Load Balancer): Diagnostics /lb-status failed"
 fi
 
+# Check Browser-safe mirror on port 8000
+MIRROR_HEALTH=$(curl -s http://127.0.0.1:8000/health || echo "error")
+if echo "$MIRROR_HEALTH" | grep -q "healthy"; then
+    report_pass "Sys1 (Browser Mirror, Port 8000): Healthy (bypasses Chrome ERR_UNSAFE_PORT)"
+else
+    report_fail "Sys1 (Browser Mirror, Port 8000): Failed: $MIRROR_HEALTH"
+fi
+
 echo ""
 echo -e "${BOLD}${BLUE}Step 4: Verifying Required API Routes & Deduplication...${NC}"
 

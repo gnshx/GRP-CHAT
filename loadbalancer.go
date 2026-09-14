@@ -334,8 +334,11 @@ func main() {
 	var healthInterval time.Duration
 	var pollInterval time.Duration
 
+	var altPort string
+
 	flag.StringVar(&backendList, "backends", "", "comma-separated backend URLs (e.g. http://10.11.221.87:3310,http://10.11.221.87:3311,http://10.11.221.87:5312)")
 	flag.StringVar(&port, "port", "6000", "port for the load balancer to listen on")
+	flag.StringVar(&altPort, "alt-port", "8000", "browser-friendly mirror port to bypass Chrome ERR_UNSAFE_PORT on port 6000")
 	flag.Int64Var(&threshold, "threshold", 15, "performance threshold: active in-flight request limit before switching backends")
 	flag.Float64Var(&cpuThreshold, "cpu-threshold", 75.0, "performance threshold: CPU percentage before switching backends")
 	flag.DurationVar(&healthInterval, "health-interval", 2*time.Second, "how often to health-check backends")
@@ -412,6 +415,18 @@ func main() {
 
 	log.Printf("==================================================================")
 	log.Printf("Dynamic Performance-Based Load Balancer started on :%s", port)
+	if altPort != "" && altPort != port {
+		log.Printf("Browser-friendly mirror running on :%s (bypasses Chrome ERR_UNSAFE_PORT)", altPort)
+		go func() {
+			altServer := &http.Server{
+				Addr:    ":" + altPort,
+				Handler: mux,
+			}
+			if err := altServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("[warn] could not start mirror on :%s: %v", altPort, err)
+			}
+		}()
+	}
 	log.Printf("Backends configured: %d", len(pool.backends))
 	log.Printf("Switch Threshold: active requests >= %d OR cpu >= %.1f%%", pool.threshold, pool.cpuThreshold)
 	log.Printf("Required routes: /message, /feed")
