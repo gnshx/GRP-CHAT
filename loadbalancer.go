@@ -142,13 +142,21 @@ func (s *ServerPool) SelectBackend() (*Backend, bool) {
 	}
 
 	if bestBackend == nil {
-		// All marked down or none available — attempt any alive as fallback
-		for _, b := range s.backends {
-			if b.IsAlive() {
-				return b, false
+		// If all backends are marked down or under heavy probe latency, never fail with 503!
+		// Fallback to whichever backend has the least active in-flight requests.
+		var minActive int64 = 1e9
+		for i, b := range s.backends {
+			act := atomic.LoadInt64(&b.ActiveRequests)
+			if act < minActive {
+				minActive = act
+				bestBackend = b
+				bestIdx = i
 			}
 		}
-		return nil, false
+		if bestBackend == nil && len(s.backends) > 0 {
+			bestBackend = s.backends[0]
+			bestIdx = 0
+		}
 	}
 
 	switched := (bestIdx != currIdx)
@@ -165,28 +173,34 @@ func (s *ServerPool) SelectBackend() (*Backend, bool) {
 	return bestBackend, switched
 }
 
-// HealthCheck probes each backend's HTTP /health endpoint.
 func (s *ServerPool) HealthCheck() {
 	for _, b := range s.backends {
 		targetURL := fmt.Sprintf("%s/health", b.URL.String())
 		resp, err := s.client.Get(targetURL)
-		alive := false
 		if err == nil && resp.StatusCode == http.StatusOK {
-			alive = true
 			_ = resp.Body.Close()
-		} else if resp != nil {
-			_ = resp.Body.Close()
-		}
-
-		wasAlive := b.IsAlive()
-		b.SetAlive(alive)
-
-		if alive != wasAlive {
-			status := "DOWN"
-			if alive {
-				status = "UP"
+			wasAlive := b.IsAlive()
+			b.SetAlive(true)
+			if !wasAlive {
+				log.Printf("[health] Backend %s is now UP", b.Host)
 			}
-			log.Printf("[health] Backend %s is now %s", b.Host, status)
+		} else {
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			b.mu.Lock()
+			b.FailedChecks++
+			failed := b.FailedChecks
+			b.mu.Unlock()
+
+			// Only mark DOWN after 3 consecutive failures to avoid flapping under heavy load
+			if failed >= 3 {
+				wasAlive := b.IsAlive()
+				b.SetAlive(false)
+				if wasAlive {
+					log.Printf("[health] Backend %s is now DOWN (after %d consecutive failed checks)", b.Host, failed)
+				}
+			}
 		}
 	}
 }
@@ -351,7 +365,7 @@ func main() {
 
 	pool.threshold = threshold
 	pool.cpuThreshold = cpuThreshold
-	pool.client = &http.Client{Timeout: 1500 * time.Millisecond}
+	pool.client = &http.Client{Timeout: 8 * time.Second}
 
 	customTransport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
