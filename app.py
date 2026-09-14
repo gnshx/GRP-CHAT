@@ -55,12 +55,15 @@ _verified_msg_lock = threading.Lock()
 # Short-window feed cache: avoids hammering DB under concurrent /feed bursts.
 _feed_cache_lock = threading.Lock()
 _feed_cache = {"ts": 0.0, "data": None, "limit": 0}  # cached feed JSON bytes
-_FEED_CACHE_TTL = 0.25  # 250ms window
+_FEED_CACHE_TTL = 0.5  # 500ms window: absorbs concurrent bursts without SQLite stampedes
 
 
 def _invalidate_feed_cache():
-    with _feed_cache_lock:
-        _feed_cache["ts"] = 0.0
+    # Intentionally do not invalidate on every message insert.
+    # During high-concurrency bursts (e.g. 500-1000 users), invalidating on every POST
+    # causes simultaneous SQLite full-table scans that choke the database.
+    # The 500ms TTL provides ultra-fast RAM responses while staying fresh.
+    pass
 
 
 @app.before_request
