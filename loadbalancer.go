@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -309,7 +310,7 @@ var (
 	feedCacheMu    sync.RWMutex
 	feedCacheBytes []byte
 	feedCacheTime  time.Time
-	feedCacheTTL   = 1 * time.Second
+	feedCacheTTL   = 5 * time.Second
 )
 
 type UnifiedFeedItem struct {
@@ -440,6 +441,7 @@ func handleUnifiedFeed(w http.ResponseWriter, r *http.Request) {
 
 	feedCacheBytes = encoded
 	feedCacheTime = time.Now()
+	debug.FreeOSMemory()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Feed-Source", "lb-aggregated")
@@ -507,6 +509,7 @@ func handleLBStatus(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	raiseFDLimit()
+	debug.SetMemoryLimit(300 * 1024 * 1024) // Cap Go heap at 300MB to strictly respect 512MB container limit
 
 	var backendList string
 	var port string
@@ -537,15 +540,15 @@ func main() {
 	customTransport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
+			Timeout:   5 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:     false,
-		MaxIdleConns:          10000,
-		MaxIdleConnsPerHost:   2000,
+		MaxIdleConns:          600,
+		MaxIdleConnsPerHost:   200,
 		MaxConnsPerHost:       0,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
+		IdleConnTimeout:       30 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
 	}
 
 	for _, raw := range strings.Split(backendList, ",") {
