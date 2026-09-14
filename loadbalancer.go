@@ -100,13 +100,13 @@ var pool ServerPool
 // SelectBackend implements performance-based dynamic load balancing.
 // It checks the current backend's load against the defined threshold.
 // If exceeded or unhealthy, it dynamically switches to the least-loaded suitable backend.
-func (s *ServerPool) SelectBackend() (*Backend, bool) {
+func (s *ServerPool) SelectBackend() (*Backend, bool, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	numBackends := len(s.backends)
 	if numBackends == 0 {
-		return nil, false
+		return nil, false, ""
 	}
 
 	currIdx := int(atomic.LoadInt64(&s.currentIndex) % int64(numBackends))
@@ -121,7 +121,9 @@ func (s *ServerPool) SelectBackend() (*Backend, bool) {
 	needSwitch := !curr.IsAlive() || currActive >= s.threshold || currCPU >= s.cpuThreshold
 
 	if !needSwitch {
-		return curr, false
+		atomic.AddInt64(&curr.ActiveRequests, 1)
+		atomic.AddUint64(&curr.TotalRequests, 1)
+		return curr, false, ""
 	}
 
 	// Dynamic Performance-Based Selection: Find suitable backend with lowest load score
@@ -160,17 +162,24 @@ func (s *ServerPool) SelectBackend() (*Backend, bool) {
 	}
 
 	switched := (bestIdx != currIdx)
+	var logMsg string
 	if switched {
 		atomic.StoreInt64(&s.currentIndex, int64(bestIdx))
 		atomic.AddUint64(&s.switchCount, 1)
-		log.Printf("[dynamic switch #%d] Load on %s (active: %d, cpu: %.1f%%) crossed threshold (%d reqs / %.1f%% cpu) -> Switched to %s (active: %d, cpu: %.1f%%, score: %.1f)",
-			atomic.LoadUint64(&s.switchCount),
-			curr.Host, currActive, currCPU,
-			s.threshold, s.cpuThreshold,
-			bestBackend.Host, atomic.LoadInt64(&bestBackend.ActiveRequests), bestBackend.CPUPercent, bestScore)
+		swCnt := atomic.LoadUint64(&s.switchCount)
+		if swCnt <= 20 || swCnt%100 == 0 {
+			logMsg = fmt.Sprintf("[dynamic switch #%d] Load on %s (active: %d, cpu: %.1f%%) crossed threshold (%d reqs / %.1f%% cpu) -> Switched to %s (active: %d, cpu: %.1f%%, score: %.1f)",
+				swCnt,
+				curr.Host, currActive, currCPU,
+				s.threshold, s.cpuThreshold,
+				bestBackend.Host, atomic.LoadInt64(&bestBackend.ActiveRequests), bestBackend.CPUPercent, bestScore)
+		}
 	}
 
-	return bestBackend, switched
+	atomic.AddInt64(&bestBackend.ActiveRequests, 1)
+	atomic.AddUint64(&bestBackend.TotalRequests, 1)
+
+	return bestBackend, switched, logMsg
 }
 
 func (s *ServerPool) HealthCheck() {
@@ -258,18 +267,18 @@ func lbHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peer, _ := pool.SelectBackend()
+	peer, _, switchLog := pool.SelectBackend()
 	if peer == nil {
 		http.Error(w, `{"error": "503 - No healthy backends available"}`, http.StatusServiceUnavailable)
 		log.Printf("[error] 503 No backend available for %s %s", r.Method, r.URL.Path)
 		return
 	}
 
-	// Track in-flight requests atomically
-	atomic.AddInt64(&peer.ActiveRequests, 1)
-	atomic.AddUint64(&peer.TotalRequests, 1)
-	start := time.Now()
+	if switchLog != "" {
+		log.Println(switchLog)
+	}
 
+	start := time.Now()
 	defer func() {
 		atomic.AddInt64(&peer.ActiveRequests, -1)
 		duration := time.Since(start)

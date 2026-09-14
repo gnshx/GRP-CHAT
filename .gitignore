@@ -20,3 +20,6 @@ loadbalancer
 
 # OS artifacts
 .DS_Store
+
+# Local benchmark tools
+dry_run_leaderboard.py

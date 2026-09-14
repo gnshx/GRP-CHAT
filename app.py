@@ -48,11 +48,14 @@ user_keys_lock = threading.Lock()
 active_requests = 0
 active_requests_lock = threading.Lock()
 
+# In-memory cache of decrypted & verified message representations to eliminate redundant ECDSA & Fernet work
+_verified_msg_cache = {}
+_verified_msg_lock = threading.Lock()
+
 # Short-window feed cache: avoids hammering DB under concurrent /feed bursts.
-# Invalidated whenever a new message is inserted. Thread-safe.
 _feed_cache_lock = threading.Lock()
 _feed_cache = {"ts": 0.0, "data": None, "limit": 0}  # cached feed JSON bytes
-_FEED_CACHE_TTL = 0.15  # 150ms window — stale by at most one request cycle
+_FEED_CACHE_TTL = 0.25  # 250ms window
 
 
 def _invalidate_feed_cache():
@@ -180,6 +183,19 @@ def api_message():
 
     # 6. Broadcast to live WebSockets if newly inserted
     if inserted:
+        item_cached = {
+            "id": msg_id,
+            "msg_id": msg_id,
+            "client-name": client_name,
+            "username": client_name,
+            "msg": msg_text,
+            "text": msg_text,
+            "timestamp": timestamp,
+            "tampered": False,
+            "signature_valid": True,
+        }
+        with _verified_msg_lock:
+            _verified_msg_cache[msg_id] = item_cached
         _invalidate_feed_cache()  # New message inserted — invalidate feed cache
         broadcast({
             "type": "message",
@@ -244,6 +260,14 @@ def api_feed():
 
     feed = []
     for row, intact in zip(rows, chain_ok):
+        mid = row.get("msg_id") or str(row["id"])
+        with _verified_msg_lock:
+            cached_item = _verified_msg_cache.get(mid)
+
+        if cached_item is not None and intact:
+            feed.append(cached_item)
+            continue
+
         plaintext = crypto_utils.decrypt_text(row["ciphertext"])
         decrypt_ok = plaintext is not None
 
@@ -257,8 +281,8 @@ def api_feed():
             )
 
         item = {
-            "id": row.get("msg_id") or str(row["id"]),
-            "msg_id": row.get("msg_id") or str(row["id"]),
+            "id": mid,
+            "msg_id": mid,
             "client-name": row["username"],
             "username": row["username"],
             "msg": plaintext if decrypt_ok else "[unreadable — ciphertext corrupted]",
@@ -267,6 +291,8 @@ def api_feed():
             "tampered": not (intact and decrypt_ok),
             "signature_valid": sig_valid,
         }
+        with _verified_msg_lock:
+            _verified_msg_cache[mid] = item
         feed.append(item)
 
     if is_dict_fmt:
