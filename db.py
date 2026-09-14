@@ -186,7 +186,7 @@ def save_message(username, ciphertext, signature, pubkey_jwk, timestamp, prev_ha
             raise
 
 
-def load_history(limit=1000):
+def load_history(limit=100000):
     """Read-only history fetch — uses thread-local read connection for speed."""
     conn = _get_read_conn()
     try:

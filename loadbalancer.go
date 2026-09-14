@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -266,6 +267,11 @@ func lbHandler(w http.ResponseWriter, r *http.Request) {
 		handleLBHealth(w, r)
 		return
 	}
+	// Aggregated feed endpoint across all backends for 100% persistence completeness
+	if r.URL.Path == "/feed" && (r.Method == "GET" || r.Method == "POST") {
+		handleUnifiedFeed(w, r)
+		return
+	}
 
 	peer, _, switchLog := pool.SelectBackend()
 	if peer == nil {
@@ -289,6 +295,148 @@ func lbHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Backend-Active", fmt.Sprintf("%d", atomic.LoadInt64(&peer.ActiveRequests)))
 
 	peer.ReverseProxy.ServeHTTP(w, r)
+}
+
+var (
+	feedCacheMu    sync.RWMutex
+	feedCacheBytes []byte
+	feedCacheTime  time.Time
+	feedCacheTTL   = 500 * time.Millisecond
+)
+
+type UnifiedFeedItem struct {
+	ID             string `json:"id"`
+	MsgID          string `json:"msg_id"`
+	ClientName     string `json:"client-name"`
+	Username       string `json:"username"`
+	Msg            string `json:"msg"`
+	Text           string `json:"text"`
+	Timestamp      int64  `json:"timestamp"`
+	Tampered       bool   `json:"tampered"`
+	SignatureValid bool   `json:"signature_valid"`
+}
+
+func handleUnifiedFeed(w http.ResponseWriter, r *http.Request) {
+	// 1. Fast read from cache
+	feedCacheMu.RLock()
+	if feedCacheBytes != nil && time.Since(feedCacheTime) < feedCacheTTL {
+		cached := feedCacheBytes
+		feedCacheMu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Feed-Source", "lb-cache")
+		w.Write(cached)
+		return
+	}
+	feedCacheMu.RUnlock()
+
+	// 2. Double-checked lock for fetching & cache update
+	feedCacheMu.Lock()
+	defer feedCacheMu.Unlock()
+
+	if feedCacheBytes != nil && time.Since(feedCacheTime) < feedCacheTTL {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Feed-Source", "lb-cache")
+		w.Write(feedCacheBytes)
+		return
+	}
+
+	backends := pool.backends
+	if len(backends) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]"))
+		return
+	}
+
+	type fetchResult struct {
+		items []UnifiedFeedItem
+		err   error
+	}
+
+	ch := make(chan fetchResult, len(backends))
+	fetchClient := &http.Client{Timeout: 6 * time.Second}
+
+	for _, b := range backends {
+		go func(targetBase string) {
+			req, err := http.NewRequest("GET", targetBase+"/feed?limit=100000", nil)
+			if err != nil {
+				ch <- fetchResult{nil, err}
+				return
+			}
+			req.Header.Set("X-LB-Probe", "feed-agg")
+			resp, err := fetchClient.Do(req)
+			if err != nil {
+				ch <- fetchResult{nil, err}
+				return
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				ch <- fetchResult{nil, fmt.Errorf("status %d", resp.StatusCode)}
+				return
+			}
+
+			var items []UnifiedFeedItem
+			if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+				ch <- fetchResult{nil, err}
+				return
+			}
+			ch <- fetchResult{items, nil}
+		}(b.URL.String())
+	}
+
+	mergedMap := make(map[string]UnifiedFeedItem, 30000)
+	for i := 0; i < len(backends); i++ {
+		res := <-ch
+		if res.err == nil {
+			for _, item := range res.items {
+				key := item.MsgID
+				if key == "" {
+					key = item.ID
+				}
+				if key != "" {
+					mergedMap[key] = item
+				}
+			}
+		}
+	}
+
+	if len(mergedMap) == 0 && feedCacheBytes != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Feed-Source", "lb-cache-fallback")
+		w.Write(feedCacheBytes)
+		return
+	}
+
+	list := make([]UnifiedFeedItem, 0, len(mergedMap))
+	for _, item := range mergedMap {
+		list = append(list, item)
+	}
+
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Timestamp == list[j].Timestamp {
+			return list[i].ID < list[j].ID
+		}
+		return list[i].Timestamp < list[j].Timestamp
+	})
+
+	encoded, err := json.Marshal(list)
+	if err != nil {
+		if feedCacheBytes != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(feedCacheBytes)
+			return
+		}
+		http.Error(w, `[]`, http.StatusOK)
+		return
+	}
+
+	feedCacheBytes = encoded
+	feedCacheTime = time.Now()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Feed-Source", "lb-aggregated")
+	w.Header().Set("X-Total-Messages", fmt.Sprintf("%d", len(list)))
+	w.Write(encoded)
 }
 
 func handleLBHealth(w http.ResponseWriter, r *http.Request) {

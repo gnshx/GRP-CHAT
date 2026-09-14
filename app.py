@@ -238,16 +238,16 @@ def api_message():
 @app.route("/feed", methods=["GET", "POST"])
 def api_feed():
     try:
-        limit = int(request.args.get("limit", 1000))
+        limit = int(request.args.get("limit", 100000))
     except (TypeError, ValueError):
-        limit = 1000
+        limit = 100000
 
     fmt = request.args.get("format", "").lower()
     is_dict_fmt = fmt in ("dict", "object", "json_obj")
 
-    # Use feed cache for standard requests (limit=1000, no special format)
+    # Use feed cache for standard requests (limit >= 1000, no special format)
     # This prevents N concurrent requests all rebuilding the same feed.
-    if limit == 1000 and not is_dict_fmt:
+    if limit >= 1000 and not is_dict_fmt:
         now = time.monotonic()
         with _feed_cache_lock:
             if _feed_cache["data"] is not None and (now - _feed_cache["ts"]) < _FEED_CACHE_TTL:
@@ -305,7 +305,7 @@ def api_feed():
 
     # Serialize once and cache for concurrent requests
     feed_bytes = json.dumps(feed, separators=(',', ':')).encode()
-    if limit == 1000:
+    if limit >= 1000:
         with _feed_cache_lock:
             _feed_cache["data"] = feed_bytes
             _feed_cache["ts"] = time.monotonic()
