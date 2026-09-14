@@ -25,10 +25,11 @@ loadbalancer
 dry_run_leaderboard.py
 
 # Reports, charts and their generators (local only)
-Dynamic_Load_Balancer_Report.docx
-Dynamic_Load_Balancer_Report.pdf
-Dynamic_Load_Balancer_Report.md
-Dynamic_Load_Balancer_Report.odt
+Dynamic_Load_Balancer_Report.*
+Nukala_Devi_Sai_Ganesh_12341500_Report.*
 generate_report.py
 make_charts.py
+generate_report_charts.py
+build_report.py
 charts/
+plots/
