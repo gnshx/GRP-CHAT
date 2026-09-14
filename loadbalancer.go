@@ -301,7 +301,7 @@ func lbHandler(w http.ResponseWriter, r *http.Request) {
 var (
 	feedStoreMu    sync.RWMutex
 	feedStoreMap   = make(map[string]UnifiedFeedItem, 50000)
-	feedStoreList  []UnifiedFeedItem
+	feedStoreList  = make([]UnifiedFeedItem, 0, 50000)
 	feedStoreDirty = true
 	feedJSONCache  []byte
 )
@@ -353,23 +353,23 @@ func handleUnifiedFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sort chronologically by timestamp
-	sort.Slice(feedStoreList, func(i, j int) bool {
-		if feedStoreList[i].Timestamp == feedStoreList[j].Timestamp {
-			return feedStoreList[i].ID < feedStoreList[j].ID
-		}
-		return feedStoreList[i].Timestamp < feedStoreList[j].Timestamp
-	})
+	var encoded []byte
+	var err error
+	if len(feedStoreList) == 0 {
+		encoded = []byte("[]")
+	} else {
+		// Sort chronologically by timestamp
+		sort.Slice(feedStoreList, func(i, j int) bool {
+			if feedStoreList[i].Timestamp == feedStoreList[j].Timestamp {
+				return feedStoreList[i].ID < feedStoreList[j].ID
+			}
+			return feedStoreList[i].Timestamp < feedStoreList[j].Timestamp
+		})
 
-	encoded, err := json.Marshal(feedStoreList)
-	if err != nil {
-		if feedJSONCache != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(feedJSONCache)
-			return
+		encoded, err = json.Marshal(feedStoreList)
+		if err != nil {
+			encoded = []byte("[]")
 		}
-		http.Error(w, `[]`, http.StatusOK)
-		return
 	}
 
 	feedJSONCache = encoded
