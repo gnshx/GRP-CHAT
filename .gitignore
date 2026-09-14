@@ -1,8 +1,22 @@
+# Python environments & cache
 venv/
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+
+# Security secrets & databases
 *.key
-*.dbapp.log
 *.db
+*.db-wal
+*.db-shm
+
+# Logs
 *.log
+logs/
+
+# Compiled binaries
+loadbalancer
+
+# OS artifacts
+.DS_Store

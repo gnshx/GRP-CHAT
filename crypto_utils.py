@@ -14,7 +14,8 @@ is never committed to the repo.
 import os
 from cryptography.fernet import Fernet, InvalidToken
 
-_KEY_FILE = os.path.join(os.path.dirname(__file__), "secret.key")
+_LOCAL_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "secret.key")
+_SHARED_KEY_FILE = os.environ.get("CHAT_SECRET_FILE", _LOCAL_KEY_FILE)
 
 
 def _load_or_create_key() -> bytes:
@@ -22,15 +23,35 @@ def _load_or_create_key() -> bytes:
     if env_key:
         return env_key.encode()
 
-    if os.path.exists(_KEY_FILE):
-        with open(_KEY_FILE, "rb") as f:
+    custom_file = os.environ.get("CHAT_SECRET_FILE")
+    if custom_file and os.path.exists(custom_file):
+        with open(custom_file, "rb") as f:
             return f.read().strip()
 
+    if os.path.exists(_SHARED_KEY_FILE):
+        with open(_SHARED_KEY_FILE, "rb") as f:
+            return f.read().strip()
+
+    if os.path.exists(_LOCAL_KEY_FILE):
+        with open(_LOCAL_KEY_FILE, "rb") as f:
+            key = f.read().strip()
+            # Also save to shared location for other backends
+            try:
+                with open(_SHARED_KEY_FILE, "wb") as sf:
+                    sf.write(key)
+            except Exception:
+                pass
+            return key
+
     key = Fernet.generate_key()
-    with open(_KEY_FILE, "wb") as f:
+    try:
+        with open(_SHARED_KEY_FILE, "wb") as f:
+            f.write(key)
+    except Exception:
+        pass
+    with open(_LOCAL_KEY_FILE, "wb") as f:
         f.write(key)
-    print(f"[crypto_utils] generated new secret.key — keep this safe, "
-          f"it is required to decrypt stored messages")
+    print("[crypto_utils] generated shared secret.key")
     return key
 
 
