@@ -11,7 +11,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -24,7 +23,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -268,11 +266,6 @@ func lbHandler(w http.ResponseWriter, r *http.Request) {
 		handleLBHealth(w, r)
 		return
 	}
-	// Aggregated feed endpoint across all backends for 100% persistence completeness
-	if r.URL.Path == "/feed" && (r.Method == "GET" || r.Method == "POST") {
-		handleUnifiedFeed(w, r)
-		return
-	}
 
 	peer, _, switchLog := pool.SelectBackend()
 	if peer == nil {
@@ -296,108 +289,6 @@ func lbHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Backend-Active", fmt.Sprintf("%d", atomic.LoadInt64(&peer.ActiveRequests)))
 
 	peer.ReverseProxy.ServeHTTP(w, r)
-}
-
-var (
-	feedStoreMu     sync.RWMutex
-	feedStoreMap    = make(map[string]UnifiedFeedItem, 50000)
-	feedStoreList   = make([]UnifiedFeedItem, 0, 50000)
-	feedJSONCache   = []byte("[]")
-	lastMarshalTime time.Time
-)
-
-type UnifiedFeedItem struct {
-	ID             string `json:"id"`
-	MsgID          string `json:"msg_id"`
-	ClientName     string `json:"client-name"`
-	Username       string `json:"username"`
-	Msg            string `json:"msg"`
-	Text           string `json:"text"`
-	Timestamp      int64  `json:"timestamp"`
-	Tampered       bool   `json:"tampered"`
-	SignatureValid bool   `json:"signature_valid"`
-}
-
-func recordAcceptedMessage(item UnifiedFeedItem) {
-	if item.ID == "" {
-		return
-	}
-	feedStoreMu.Lock()
-	if _, exists := feedStoreMap[item.ID]; !exists {
-		feedStoreMap[item.ID] = item
-		feedStoreList = append(feedStoreList, item)
-	}
-	feedStoreMu.Unlock()
-}
-
-func handleUnifiedFeed(w http.ResponseWriter, r *http.Request) {
-	now := time.Now()
-	feedStoreMu.RLock()
-	if feedJSONCache != nil && now.Sub(lastMarshalTime) < 1*time.Second {
-		data := feedJSONCache
-		feedStoreMu.RUnlock()
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Feed-Source", "lb-live-store")
-		w.Write(data)
-		return
-	}
-	feedStoreMu.RUnlock()
-
-	feedStoreMu.Lock()
-	defer feedStoreMu.Unlock()
-
-	if feedJSONCache != nil && time.Since(lastMarshalTime) < 1*time.Second {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Feed-Source", "lb-live-store")
-		w.Write(feedJSONCache)
-		return
-	}
-
-	var encoded []byte
-	if len(feedStoreList) == 0 {
-		encoded = []byte("[]")
-	} else {
-		encoded, _ = json.Marshal(feedStoreList)
-	}
-
-	feedJSONCache = encoded
-	lastMarshalTime = time.Now()
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Feed-Source", "lb-live-store")
-	w.Header().Set("X-Total-Messages", fmt.Sprintf("%d", len(feedStoreList)))
-	w.Write(encoded)
-}
-
-func raiseFDLimit() {
-	var rLimit syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err == nil {
-		rLimit.Cur = 65535
-		if rLimit.Max < 65535 {
-			rLimit.Max = 65535
-		}
-		_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
-	}
-}
-
-func syncInitialFeedFromBackends() {
-	client := &http.Client{Timeout: 5 * time.Second}
-	for _, b := range pool.backends {
-		resp, err := client.Get(b.URL.String() + "/feed?limit=100000")
-		if err != nil || resp.StatusCode != http.StatusOK {
-			if resp != nil {
-				_ = resp.Body.Close()
-			}
-			continue
-		}
-		var items []UnifiedFeedItem
-		_ = json.NewDecoder(resp.Body).Decode(&items)
-		_ = resp.Body.Close()
-		for _, item := range items {
-			recordAcceptedMessage(item)
-		}
-	}
-	log.Printf("[feed-store] Seeded %d initial messages from backends", len(feedStoreList))
 }
 
 func handleLBHealth(w http.ResponseWriter, r *http.Request) {
@@ -476,7 +367,6 @@ func main() {
 	flag.DurationVar(&healthInterval, "health-interval", 2*time.Second, "how often to health-check backends")
 	flag.DurationVar(&pollInterval, "poll-interval", 1*time.Second, "how often to poll backend /load metrics")
 	flag.Parse()
-	raiseFDLimit()
 
 	if backendList == "" {
 		backendList = "http://127.0.0.1:3310,http://127.0.0.1:3311,http://127.0.0.1:5312"
@@ -521,39 +411,6 @@ func main() {
 		backendID := serverURL.Host
 		proxy.ModifyResponse = func(resp *http.Response) error {
 			resp.Header.Set("X-Backend-ID", backendID)
-
-			if resp.StatusCode == http.StatusOK && resp.Request != nil && strings.HasPrefix(resp.Request.URL.Path, "/message") {
-				bodyBytes, err := io.ReadAll(resp.Body)
-				if err == nil {
-					resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-					var msgResp struct {
-						Status     string `json:"status"`
-						ID         string `json:"id"`
-						MsgID      string `json:"msg_id"`
-						ClientName string `json:"client-name"`
-						Msg        string `json:"msg"`
-						Duplicate  bool   `json:"duplicate"`
-						Timestamp  int64  `json:"timestamp"`
-					}
-					if err := json.Unmarshal(bodyBytes, &msgResp); err == nil && msgResp.Status == "ok" {
-						mid := msgResp.MsgID
-						if mid == "" {
-							mid = msgResp.ID
-						}
-						recordAcceptedMessage(UnifiedFeedItem{
-							ID:             mid,
-							MsgID:          mid,
-							ClientName:     msgResp.ClientName,
-							Username:       msgResp.ClientName,
-							Msg:            msgResp.Msg,
-							Text:           msgResp.Msg,
-							Timestamp:      msgResp.Timestamp,
-							Tampered:       false,
-							SignatureValid: true,
-						})
-					}
-				}
-			}
 			return nil
 		}
 
@@ -571,17 +428,12 @@ func main() {
 	pool.PollMetrics()
 	go healthAndMetricsLoop(healthInterval, pollInterval)
 
-	// Seed in-memory live feed with any existing messages from backends
-	go syncInitialFeedFromBackends()
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", lbHandler)
 
 	server := &http.Server{
-		Addr:              ":" + port,
-		Handler:           mux,
-		ReadHeaderTimeout: 15 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		Addr:    ":" + port,
+		Handler: mux,
 	}
 
 	log.Printf("==================================================================")
@@ -590,10 +442,8 @@ func main() {
 		log.Printf("Browser-friendly mirror running on :%s (bypasses Chrome ERR_UNSAFE_PORT)", altPort)
 		go func() {
 			altServer := &http.Server{
-				Addr:              ":" + altPort,
-				Handler:           mux,
-				ReadHeaderTimeout: 15 * time.Second,
-				IdleTimeout:       120 * time.Second,
+				Addr:    ":" + altPort,
+				Handler: mux,
 			}
 			if err := altServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("[warn] could not start mirror on :%s: %v", altPort, err)
@@ -606,13 +456,7 @@ func main() {
 	log.Printf("Status endpoint: /lb-status")
 	log.Printf("==================================================================")
 
-	ln, err := net.Listen("tcp", ":"+port)
-	if err != nil {
-		log.Fatalf("failed to listen on :%s: %v", port, err)
-	}
-	defer ln.Close()
-
-	if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
-		log.Printf("[server stopped] %v", err)
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatal(err)
 	}
 }
