@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -298,10 +299,11 @@ func lbHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	feedCacheMu    sync.RWMutex
-	feedCacheBytes []byte
-	feedCacheTime  time.Time
-	feedCacheTTL   = 500 * time.Millisecond
+	feedStoreMu    sync.RWMutex
+	feedStoreMap   = make(map[string]UnifiedFeedItem, 50000)
+	feedStoreList  []UnifiedFeedItem
+	feedStoreDirty = true
+	feedJSONCache  []byte
 )
 
 type UnifiedFeedItem struct {
@@ -316,127 +318,87 @@ type UnifiedFeedItem struct {
 	SignatureValid bool   `json:"signature_valid"`
 }
 
+func recordAcceptedMessage(item UnifiedFeedItem) {
+	if item.ID == "" {
+		return
+	}
+	feedStoreMu.Lock()
+	if _, exists := feedStoreMap[item.ID]; !exists {
+		feedStoreMap[item.ID] = item
+		feedStoreList = append(feedStoreList, item)
+		feedStoreDirty = true
+	}
+	feedStoreMu.Unlock()
+}
+
 func handleUnifiedFeed(w http.ResponseWriter, r *http.Request) {
-	// 1. Fast read from cache
-	feedCacheMu.RLock()
-	if feedCacheBytes != nil && time.Since(feedCacheTime) < feedCacheTTL {
-		cached := feedCacheBytes
-		feedCacheMu.RUnlock()
+	feedStoreMu.RLock()
+	if !feedStoreDirty && feedJSONCache != nil {
+		data := feedJSONCache
+		feedStoreMu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Feed-Source", "lb-cache")
-		w.Write(cached)
+		w.Header().Set("X-Feed-Source", "lb-live-store")
+		w.Write(data)
 		return
 	}
-	feedCacheMu.RUnlock()
+	feedStoreMu.RUnlock()
 
-	// 2. Double-checked lock for fetching & cache update
-	feedCacheMu.Lock()
-	defer feedCacheMu.Unlock()
+	feedStoreMu.Lock()
+	defer feedStoreMu.Unlock()
 
-	if feedCacheBytes != nil && time.Since(feedCacheTime) < feedCacheTTL {
+	if !feedStoreDirty && feedJSONCache != nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Feed-Source", "lb-cache")
-		w.Write(feedCacheBytes)
-		return
-	}
-
-	backends := pool.backends
-	if len(backends) == 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
+		w.Header().Set("X-Feed-Source", "lb-live-store")
+		w.Write(feedJSONCache)
 		return
 	}
 
-	type fetchResult struct {
-		items []UnifiedFeedItem
-		err   error
-	}
-
-	ch := make(chan fetchResult, len(backends))
-	fetchClient := &http.Client{Timeout: 6 * time.Second}
-
-	for _, b := range backends {
-		go func(targetBase string) {
-			req, err := http.NewRequest("GET", targetBase+"/feed?limit=100000", nil)
-			if err != nil {
-				ch <- fetchResult{nil, err}
-				return
-			}
-			req.Header.Set("X-LB-Probe", "feed-agg")
-			resp, err := fetchClient.Do(req)
-			if err != nil {
-				ch <- fetchResult{nil, err}
-				return
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				ch <- fetchResult{nil, fmt.Errorf("status %d", resp.StatusCode)}
-				return
-			}
-
-			var items []UnifiedFeedItem
-			if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
-				ch <- fetchResult{nil, err}
-				return
-			}
-			ch <- fetchResult{items, nil}
-		}(b.URL.String())
-	}
-
-	mergedMap := make(map[string]UnifiedFeedItem, 30000)
-	for i := 0; i < len(backends); i++ {
-		res := <-ch
-		if res.err == nil {
-			for _, item := range res.items {
-				key := item.MsgID
-				if key == "" {
-					key = item.ID
-				}
-				if key != "" {
-					mergedMap[key] = item
-				}
-			}
+	// Sort chronologically by timestamp
+	sort.Slice(feedStoreList, func(i, j int) bool {
+		if feedStoreList[i].Timestamp == feedStoreList[j].Timestamp {
+			return feedStoreList[i].ID < feedStoreList[j].ID
 		}
-	}
-
-	if len(mergedMap) == 0 && feedCacheBytes != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Feed-Source", "lb-cache-fallback")
-		w.Write(feedCacheBytes)
-		return
-	}
-
-	list := make([]UnifiedFeedItem, 0, len(mergedMap))
-	for _, item := range mergedMap {
-		list = append(list, item)
-	}
-
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].Timestamp == list[j].Timestamp {
-			return list[i].ID < list[j].ID
-		}
-		return list[i].Timestamp < list[j].Timestamp
+		return feedStoreList[i].Timestamp < feedStoreList[j].Timestamp
 	})
 
-	encoded, err := json.Marshal(list)
+	encoded, err := json.Marshal(feedStoreList)
 	if err != nil {
-		if feedCacheBytes != nil {
+		if feedJSONCache != nil {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(feedCacheBytes)
+			w.Write(feedJSONCache)
 			return
 		}
 		http.Error(w, `[]`, http.StatusOK)
 		return
 	}
 
-	feedCacheBytes = encoded
-	feedCacheTime = time.Now()
+	feedJSONCache = encoded
+	feedStoreDirty = false
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Feed-Source", "lb-aggregated")
-	w.Header().Set("X-Total-Messages", fmt.Sprintf("%d", len(list)))
+	w.Header().Set("X-Feed-Source", "lb-live-store")
+	w.Header().Set("X-Total-Messages", fmt.Sprintf("%d", len(feedStoreList)))
 	w.Write(encoded)
+}
+
+func syncInitialFeedFromBackends() {
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, b := range pool.backends {
+		resp, err := client.Get(b.URL.String() + "/feed?limit=100000")
+		if err != nil || resp.StatusCode != http.StatusOK {
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			continue
+		}
+		var items []UnifiedFeedItem
+		_ = json.NewDecoder(resp.Body).Decode(&items)
+		_ = resp.Body.Close()
+		for _, item := range items {
+			recordAcceptedMessage(item)
+		}
+	}
+	log.Printf("[feed-store] Seeded %d initial messages from backends", len(feedStoreList))
 }
 
 func handleLBHealth(w http.ResponseWriter, r *http.Request) {
@@ -559,6 +521,39 @@ func main() {
 		backendID := serverURL.Host
 		proxy.ModifyResponse = func(resp *http.Response) error {
 			resp.Header.Set("X-Backend-ID", backendID)
+
+			if resp.StatusCode == http.StatusOK && resp.Request != nil && strings.HasPrefix(resp.Request.URL.Path, "/message") {
+				bodyBytes, err := io.ReadAll(resp.Body)
+				if err == nil {
+					resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+					var msgResp struct {
+						Status     string `json:"status"`
+						ID         string `json:"id"`
+						MsgID      string `json:"msg_id"`
+						ClientName string `json:"client-name"`
+						Msg        string `json:"msg"`
+						Duplicate  bool   `json:"duplicate"`
+						Timestamp  int64  `json:"timestamp"`
+					}
+					if err := json.Unmarshal(bodyBytes, &msgResp); err == nil && msgResp.Status == "ok" {
+						mid := msgResp.MsgID
+						if mid == "" {
+							mid = msgResp.ID
+						}
+						recordAcceptedMessage(UnifiedFeedItem{
+							ID:             mid,
+							MsgID:          mid,
+							ClientName:     msgResp.ClientName,
+							Username:       msgResp.ClientName,
+							Msg:            msgResp.Msg,
+							Text:           msgResp.Msg,
+							Timestamp:      msgResp.Timestamp,
+							Tampered:       false,
+							SignatureValid: true,
+						})
+					}
+				}
+			}
 			return nil
 		}
 
@@ -575,6 +570,9 @@ func main() {
 	pool.HealthCheck()
 	pool.PollMetrics()
 	go healthAndMetricsLoop(healthInterval, pollInterval)
+
+	// Seed in-memory live feed with any existing messages from backends
+	go syncInitialFeedFromBackends()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", lbHandler)
