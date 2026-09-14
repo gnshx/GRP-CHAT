@@ -41,22 +41,27 @@ def _get_read_conn():
     return _local.conn
 
 
+_local_write = threading.local()
+
+
 def get_conn():
-    """Get a fresh connection (used by write operations)."""
-    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
-    conn = sqlite3.connect(
-        DB_PATH,
-        timeout=30.0,
-        check_same_thread=False,
-        isolation_level=None
-    )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=15000;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA cache_size=-16384;")
-    conn.execute("PRAGMA temp_store=MEMORY;")
-    conn.execute("PRAGMA mmap_size=268435456;")
-    return conn
+    """Get or reuse a thread-local write connection."""
+    if not hasattr(_local_write, 'conn') or _local_write.conn is None:
+        os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
+        conn = sqlite3.connect(
+            DB_PATH,
+            timeout=30.0,
+            check_same_thread=False,
+            isolation_level=None
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=20000;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA cache_size=-16384;")
+        conn.execute("PRAGMA temp_store=MEMORY;")
+        conn.execute("PRAGMA mmap_size=268435456;")
+        _local_write.conn = conn
+    return _local_write.conn
 
 
 def init_db():
@@ -149,9 +154,8 @@ def save_message_atomic(msg_id, username, ciphertext, signature, pubkey_jwk, tim
                 conn.execute("ROLLBACK")
             except Exception:
                 pass
+            _local_write.conn = None
             raise
-        finally:
-            conn.close()
 
 
 def save_message(username, ciphertext, signature, pubkey_jwk, timestamp, prev_hash, record_hash, msg_id=None):
@@ -178,9 +182,8 @@ def save_message(username, ciphertext, signature, pubkey_jwk, timestamp, prev_ha
                 conn.execute("ROLLBACK")
             except Exception:
                 pass
+            _local_write.conn = None
             raise
-        finally:
-            conn.close()
 
 
 def load_history(limit=1000):
@@ -226,8 +229,9 @@ def upsert_user_pubkey(username, pubkey_jwk_str):
                 "ON CONFLICT(username) DO UPDATE SET pubkey_jwk = excluded.pubkey_jwk",
                 (username, pubkey_jwk_str)
             )
-        finally:
-            conn.close()
+        except Exception:
+            _local_write.conn = None
+            raise
 
 
 def get_user_pubkey(username):
